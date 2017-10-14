@@ -972,8 +972,8 @@ int audio_suspend_stream()
             else if (status == A2DP_CTRL_ACK_SUCCESS)
             {
                 ALOGW("audio suspend stream successful");
-                pthread_mutex_unlock(&audio_stream.lock);
                 audio_stream.state = AUDIO_A2DP_STATE_SUSPENDED;
+                pthread_mutex_unlock(&audio_stream.lock);
                 return 0;
             }
             else
@@ -1030,6 +1030,7 @@ void * audio_get_codec_config(uint8_t *multicast_status, uint8_t *num_dev,
 
     if (stack_cb == NULL) {
        ALOGW("get codec config returned due to stack deinit");
+       pthread_mutex_unlock(&audio_stream.lock);
        return NULL;
     }
     for (i = 0; i < STREAM_START_MAX_RETRY_COUNT; i++)
