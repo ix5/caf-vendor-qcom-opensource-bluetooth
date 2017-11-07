@@ -39,6 +39,7 @@
 
 #include <hardware/hardware.h>
 #include <utils/Log.h>
+#include <cutils/properties.h>
 
 #ifdef LOG_TAG
 #undef LOG_TAG
@@ -143,7 +144,8 @@ static const char* dump_a2dp_hal_state(int event)
             return "UNKNOWN STATE ID";
     }
 }
-static void* a2dp_codec_parser(uint8_t *codec_cfg, audio_format_t *codec_type)
+static void* a2dp_codec_parser(uint8_t *codec_cfg, audio_format_t *codec_type,
+                                                   uint32_t *sample_freq)
 {
     char byte,len;
     uint8_t *p_cfg = codec_cfg;
@@ -256,6 +258,9 @@ static void* a2dp_codec_parser(uint8_t *codec_cfg, audio_format_t *codec_type)
         sbc_codec.bitrate |= (*p_cfg++ << 16);
         sbc_codec.bitrate |= (*p_cfg++ << 24);
         *codec_type = AUDIO_FORMAT_SBC;
+
+        if(sample_freq) *sample_freq = sbc_codec.sampling_rate;
+
         ALOGW("SBC: Done copying full codec config");
         return ((void *)(&sbc_codec));
     } else if (codec_cfg[CODEC_OFFSET] == CODEC_TYPE_AAC)
@@ -353,6 +358,8 @@ static void* a2dp_codec_parser(uint8_t *codec_cfg, audio_format_t *codec_type)
         aac_codec.bitrate = aac_bit_rate;
 
         *codec_type = AUDIO_FORMAT_AAC;
+
+        if(sample_freq) *sample_freq = aac_codec.sampling_rate;
         ALOGW("AAC: Done copying full codec config");
         return ((void *)(&aac_codec));
     }
@@ -435,6 +442,7 @@ static void* a2dp_codec_parser(uint8_t *codec_cfg, audio_format_t *codec_type)
         aptx_codec.bitrate |= (*p_cfg++ << 16);
         aptx_codec.bitrate |= (*p_cfg++ << 24);
 
+        if(sample_freq) *sample_freq = aptx_codec.sampling_rate;
         ALOGW("APTx: Done copying full codec config");
         return ((void *)&aptx_codec);
     }
@@ -1056,7 +1064,7 @@ void * audio_get_codec_config(uint8_t *multicast_status, uint8_t *num_dev,
         if (status == A2DP_CTRL_ACK_SUCCESS)
         {
             pthread_mutex_unlock(&audio_stream.lock);
-            return (a2dp_codec_parser(&audio_stream.codec_cfg[0], codec_type));
+            return (a2dp_codec_parser(&audio_stream.codec_cfg[0], codec_type, NULL));
         }
         INFO("%s: a2dp stream not configured,wait 100mse & retry", __func__);
         usleep(100000);
@@ -1076,7 +1084,7 @@ void* audio_get_next_codec_config(uint8_t idx, audio_format_t *codec_type)
         if (status == A2DP_CTRL_ACK_SUCCESS)
         {
             pthread_mutex_unlock(&audio_stream.lock);
-            return (a2dp_codec_parser(&audio_stream.codec_cfg[0], codec_type));
+            return (a2dp_codec_parser(&audio_stream.codec_cfg[0], codec_type, NULL));
         }
         INFO("%s: a2dp stream not configured,wait 100mse & retry", __func__);
         usleep(100000);
@@ -1192,4 +1200,96 @@ void ldac_codec_parser(uint8_t *codec_cfg)
 
     ALOGW("%s: LDAC: bitrate: %lu", __func__, ldac_codec.bitrate);
     ALOGW("LDAC: Done copying full codec config");
+}
+
+bool audio_is_scrambling_enabled(void)
+{
+    audio_format_t codec_type;
+    int i;
+    char value[PROPERTY_VALUE_MAX];
+    uint8_t *codec_cfg = NULL;
+    uint32_t sample_freq = 0;
+    memset(value, '\0', sizeof(char)*PROPERTY_VALUE_MAX);
+    ALOGW("audio_is_scrambling_enabled: state %s",
+                    dump_a2dp_hal_state(audio_stream.state));
+    tA2DP_CTRL_ACK status = A2DP_CTRL_ACK_UNKNOWN;
+
+    if (stack_cb == NULL)
+    {
+        ALOGW("audio_is_scrambling_enabled returned false due to stack deinit");
+        return false;
+    }
+    if( property_get("persist.vendor.bt.splita2dp.44_1_war", value, "false"))
+    {
+        if(!strcmp(value, "false"))
+        {
+            ALOGW("persist.vendor.bt.splita2dp.44_1_war is not set");
+            return false;
+        }
+    }
+    else
+    {
+        ALOGE("Error in fetching persist.vendor.bt.splita2dp.44_1_war property");
+        return false;
+    }
+
+    if( property_get("persist.vendor.bt.soc.scram_freqs", value, "false"))
+    {
+        if(!strcmp(value, "false"))
+        {
+            ALOGW("persist.vendor.bt.soc.scram_freqs is not set");
+            return false;
+        }
+    }
+    else
+    {
+        ALOGE("Error in fetching persist.vendor.bt.soc.scram_freqs property");
+        return false;
+    }
+
+    pthread_mutex_lock(&audio_stream.lock);
+    for (i = 0; i < STREAM_START_MAX_RETRY_COUNT; i++)
+    {
+        status = a2dp_read_codec_config(&audio_stream, 0);
+        if (status == A2DP_CTRL_ACK_SUCCESS)
+        {
+            if(!a2dp_codec_parser(&audio_stream.codec_cfg[0],
+                        &codec_type, &sample_freq)) {
+                status = A2DP_CTRL_ACK_UNKNOWN;
+            }
+            break;
+        }
+        INFO("%s: a2dp stream not configured,wait 100mse & retry", __func__);
+        usleep(100000);
+    }
+    if(status == A2DP_CTRL_ACK_SUCCESS) {
+        ALOGW("audio_is_scrambling_enabled sample_freq %ld",sample_freq);
+        switch (sample_freq) {
+            case 44100:
+                if(!strstr(value, "441")) status = A2DP_CTRL_ACK_UNKNOWN;
+                break;
+            case 48000:
+                if(!strstr(value, "48")) status = A2DP_CTRL_ACK_UNKNOWN;
+                break;
+            case 88200:
+                if(!strstr(value, "882")) status = A2DP_CTRL_ACK_UNKNOWN;
+                break;
+            case 96000:
+                if(!strstr(value, "96")) status = A2DP_CTRL_ACK_UNKNOWN;
+                break;
+            case 176400:
+                if(!strstr(value, "1764")) status = A2DP_CTRL_ACK_UNKNOWN;
+                break;
+            case 192000:
+                if(!strstr(value, "192")) status = A2DP_CTRL_ACK_UNKNOWN;
+                break;
+            default:
+                ALOGE("Invalid sampling freqency, return A2DP_CTRL_ACK_UNKNOWN");
+                status = A2DP_CTRL_ACK_UNKNOWN;
+                break;
+        }
+    }
+    ALOGW("audio_is_scrambling_enabled = %s",dump_a2dp_ctrl_ack(status));
+    pthread_mutex_unlock(&audio_stream.lock);
+    return status == A2DP_CTRL_ACK_SUCCESS;
 }
