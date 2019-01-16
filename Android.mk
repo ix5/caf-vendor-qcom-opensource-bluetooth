@@ -16,6 +16,8 @@ LOCAL_CERTIFICATE := platform
 LOCAL_JAVA_LIBRARIES := javax.obex
 LOCAL_JAVA_LIBRARIES += telephony-common
 
+LOCAL_PRIVATE_PLATFORM_APIS := true
+
 LOCAL_STATIC_JAVA_LIBRARIES := com.android.vcard
 
 #LOCAL_REQUIRED_MODULES := bluetooth.default
